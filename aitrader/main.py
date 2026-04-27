@@ -9,6 +9,7 @@ from . import data as data_mod
 from . import model as ai_model
 from .backtest import backtest
 from .config import CONFIG
+from .oscillator import run_oscillator
 from .trader import run_paper_trading
 
 
@@ -37,6 +38,19 @@ def cmd_live(args: argparse.Namespace) -> None:
     run_paper_trading(args.tickers or CONFIG.tickers)
 
 
+def cmd_osc(args: argparse.Namespace) -> None:
+    run_oscillator(
+        tickers=args.tickers or CONFIG.tickers,
+        window=args.window,
+        buy_z=args.buy_z,
+        sell_z=args.sell_z,
+        take_profit=args.tp,
+        stop_loss=args.sl,
+        poll_seconds=args.poll,
+        starting_cash=args.cash,
+    )
+
+
 def cmd_quote(args: argparse.Namespace) -> None:
     for t in (args.tickers or CONFIG.tickers):
         try:
@@ -61,6 +75,17 @@ def main() -> None:
     p_live = sub.add_parser("live", help="纸面实时交易（无真实下单）")
     p_live.add_argument("--tickers", nargs="+")
     p_live.set_defaults(func=cmd_live)
+
+    p_osc = sub.add_parser("osc", help="日内震荡策略：跌了买、涨了卖，持续 run（推荐）")
+    p_osc.add_argument("--tickers", nargs="+")
+    p_osc.add_argument("--window", type=int, default=20, help="均线窗口（分钟）")
+    p_osc.add_argument("--buy-z", dest="buy_z", type=float, default=-1.0, help="跌到几个标准差以下买入")
+    p_osc.add_argument("--sell-z", dest="sell_z", type=float, default=0.5, help="涨到几个标准差以上卖出")
+    p_osc.add_argument("--tp", type=float, default=0.005, help="止盈比例，例如 0.005=0.5%%")
+    p_osc.add_argument("--sl", type=float, default=0.01, help="止损比例，例如 0.01=1%%")
+    p_osc.add_argument("--poll", type=int, default=30, help="刷新秒数")
+    p_osc.add_argument("--cash", type=float, default=CONFIG.starting_cash, help="起始资金")
+    p_osc.set_defaults(func=cmd_osc)
 
     p_quote = sub.add_parser("quote", help="打印实时价格")
     p_quote.add_argument("--tickers", nargs="+")
