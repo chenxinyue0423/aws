@@ -15,22 +15,26 @@ pip install -r requirements.txt
 
 ## 模式 A：日内震荡（推荐）
 
-> 思路：盯每只票最近 20 分钟的均线。当前价比均线低 1 个标准差就买，回到均线上方一点就卖。配 0.5% 止盈、1% 止损做兜底。盘中持续 run。
+> 思路：盯每只票最近 N 分钟的均线。当前价比均线低 X 个标准差就买，回到均线上方一点就卖，配止盈/止损兜底。盘中持续 run。
+>
+> **参数会被训练**：`osc-train` 用最近 7 天 1m 历史做网格搜索，对每只票挑出最优 (window, buy_z, sell_z, take_profit, stop_loss)，存到 `models/osc_{TICKER}.json`。`osc` 启动时会自动加载。
 
 ```bash
-# 默认 5 只票，10000 起步资金，每 30 秒刷新一次
-python -m aitrader.main osc
+# 1. 训练每只票的最优参数（一次性，几十秒到几分钟）
+python -m aitrader.main osc-train
+python -m aitrader.main osc-train --tickers AAPL TSLA --days 14
 
-# 自定义标的
+# 2. 跑实盘纸面震荡，自动加载训练参数
+python -m aitrader.main osc
 python -m aitrader.main osc --tickers AAPL TSLA NVDA
 
-# 调更激进或更保守
-python -m aitrader.main osc --window 15 --buy-z -0.8 --sell-z 0.3 --tp 0.003 --sl 0.008
+# 3. 想手动覆盖单个参数也行（其余仍用训练值）
+python -m aitrader.main osc --buy-z -0.8 --tp 0.003
 ```
 
 **参数表**
 
-| 参数 | 默认 | 含义 |
+| 参数 | 默认（未训练时） | 含义 |
 | --- | --- | --- |
 | `--tickers` | AAPL/MSFT/NVDA/TSLA/SPY | 监控标的 |
 | `--window` | 20 | 滚动均线窗口（分钟） |
@@ -40,6 +44,10 @@ python -m aitrader.main osc --window 15 --buy-z -0.8 --sell-z 0.3 --tp 0.003 --s
 | `--sl` | 0.01 | 止损，1% |
 | `--poll` | 30 | 刷新秒数 |
 | `--cash` | 10000 | 起始资金 |
+
+参数加载优先级：**命令行覆盖 > `models/osc_{TICKER}.json` 训练值 > 上表默认值**。
+
+**训练评分**：网格内对每个组合在最近 7 天 1m 数据上做回测，评分 = 总收益 + 0.5 × 最大回撤（即收益高、回撤小的组合得分高），并要求最少 5 笔交易避免过拟合到不动手的组合。
 
 终端会持续打印每只票的 z 分数与触发的买卖，所有事件同时写到 `logs/osc_*.jsonl`。
 
@@ -72,13 +80,14 @@ aitrader/
   config.py       # 集中参数
   data.py         # yfinance 拉数据 / 实时流
   oscillator.py   # 日内震荡策略（osc 模式）
+  osc_train.py    # 震荡策略参数搜索 + 保存/加载（osc-train）
   features.py     # 波动惯性特征（AI 模式用）
   model.py        # 训练 / 保存 / 预测（AI 模式用）
   strategy.py     # 通用投资组合 + AI 模式买卖逻辑
   trader.py       # AI 模式纸面交易循环
   backtest.py     # AI 模式回测
   main.py         # CLI 入口
-models/           # AI 模型 .joblib
+models/           # AI 模型 .joblib + osc_*.json 最优参数
 logs/             # 交易事件 jsonl
 ```
 

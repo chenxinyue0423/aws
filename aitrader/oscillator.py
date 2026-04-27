@@ -1,12 +1,8 @@
-"""日内震荡策略：跌了就买，涨了就卖。无需训练，持续 run。
+"""日内震荡策略：跌了买、涨了卖。每只票可以使用各自训练好的参数。
 
-核心思路：
-1. 拉每只票的 1 分钟 K 线。
-2. 算最近 N 分钟的均值与标准差。
-3. 当前价比均值低 buy_z 个标准差 → 买入。
-4. 持仓后，价格回到均值之上 sell_z 个标准差 / 达到止盈 / 触及止损 → 卖出。
-
-参数都可以通过 CLI 调，默认偏激进，盘中可以做几十笔。
+每只票独立维护一组 (window, buy_z, sell_z, take_profit, stop_loss)。
+- 没训练过 → 用全局默认值。
+- 跑过 `osc-train` → 自动加载 models/osc_{TICKER}.json 的最优参数。
 """
 
 from __future__ import annotations
@@ -18,7 +14,17 @@ import pandas as pd
 
 from . import data as data_mod
 from .config import LOG_DIR
+from .osc_train import load_params
 from .strategy import Portfolio
+
+
+DEFAULT_PARAMS = {
+    "window": 20,
+    "buy_z": -1.0,
+    "sell_z": 0.5,
+    "take_profit": 0.005,
+    "stop_loss": 0.01,
+}
 
 
 def zscore(closes: pd.Series, window: int) -> float:
@@ -31,41 +37,53 @@ def zscore(closes: pd.Series, window: int) -> float:
     return float((closes.iloc[-1] - recent.mean()) / std)
 
 
+def resolve_params(ticker: str, override: dict | None = None) -> dict:
+    """合并优先级：调用方 override > 训练后保存的参数 > 全局默认。"""
+    params = dict(DEFAULT_PARAMS)
+    saved = load_params(ticker)
+    if saved:
+        params.update(saved)
+    if override:
+        params.update(override)
+    return params
+
+
 def run_oscillator(
     tickers: list[str],
-    window: int = 20,
-    buy_z: float = -1.0,
-    sell_z: float = 0.5,
-    take_profit: float = 0.005,
-    stop_loss: float = 0.01,
+    override: dict | None = None,
     poll_seconds: int = 30,
     starting_cash: float = 10_000.0,
 ) -> None:
     pf = Portfolio(cash=starting_cash)
     log_file = LOG_DIR / f"osc_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.jsonl"
-    print(f"[osc] 启动 标的={tickers} 起始资金={starting_cash:,.0f}")
-    print(f"[osc] window={window}m buy_z={buy_z} sell_z={sell_z} tp={take_profit:.1%} sl={stop_loss:.1%} 刷新={poll_seconds}s")
+    params_per_ticker = {t: resolve_params(t, override) for t in tickers}
+
+    print(f"[osc] 启动 标的={tickers} 起始资金={starting_cash:,.0f} 刷新={poll_seconds}s")
     print(f"[osc] 日志 → {log_file}")
+    for t, p in params_per_ticker.items():
+        tag = "trained" if load_params(t) else "default"
+        print(f"[osc] {t} ({tag}): {p}")
 
     for snapshot in data_mod.stream_bars(tickers, "1m", poll_seconds):
         prices_now: dict[str, float] = {}
         events: list[dict] = []
 
         for t, df in snapshot.items():
-            if len(df) < window:
+            p = params_per_ticker[t]
+            if len(df) < p["window"]:
                 continue
             price = float(df["close"].iloc[-1])
             prices_now[t] = price
-            z = zscore(df["close"], window)
+            z = zscore(df["close"], p["window"])
             pos = pf._pos(t)
 
             action = "HOLD"
             if pos.qty > 0:
                 pnl = pos.unrealized_pct(price)
-                if pnl >= take_profit or pnl <= -stop_loss or z >= sell_z:
+                if pnl >= p["take_profit"] or pnl <= -p["stop_loss"] or z >= p["sell_z"]:
                     pf.sell(t, price, df.index[-1])
                     action = f"SELL(pnl={pnl:+.2%})"
-            elif z <= buy_z:
+            elif z <= p["buy_z"]:
                 equity = pf.equity(prices_now)
                 if pf.buy(t, price, df.index[-1], equity):
                     action = "BUY"
