@@ -15,6 +15,7 @@ import pandas as pd
 from . import data as data_mod
 from .config import LOG_DIR
 from .osc_train import load_params
+from .safety import SafetyConfig, SafetyState, check_buy
 from .strategy import Portfolio
 
 
@@ -53,20 +54,29 @@ def run_oscillator(
     override: dict | None = None,
     poll_seconds: int = 30,
     starting_cash: float = 10_000.0,
+    safety_cfg: SafetyConfig | None = None,
 ) -> None:
     pf = Portfolio(cash=starting_cash)
     log_file = LOG_DIR / f"osc_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.jsonl"
     params_per_ticker = {t: resolve_params(t, override) for t in tickers}
+    # 全局一个刹车状态：连续亏损在所有票之间共享冷静期。
+    safety = SafetyState(cfg=safety_cfg or SafetyConfig())
 
     print(f"[osc] 启动 标的={tickers} 起始资金={starting_cash:,.0f} 刷新={poll_seconds}s")
     print(f"[osc] 日志 → {log_file}")
     for t, p in params_per_ticker.items():
         tag = "trained" if load_params(t) else "default"
         print(f"[osc] {t} ({tag}): {p}")
+    print(
+        f"[osc] 刹车 连亏冷静={safety.cfg.loss_streak}笔/{safety.cfg.cooldown_minutes}分钟 "
+        f"不追>{safety.cfg.chase_pct:.0%} 不接刀(连跌3根) "
+        f"波动>{safety.cfg.vol_outlier_mult}倍休市"
+    )
 
     for snapshot in data_mod.stream_bars(tickers, "1m", poll_seconds):
         prices_now: dict[str, float] = {}
         events: list[dict] = []
+        now = datetime.utcnow()
 
         for t, df in snapshot.items():
             p = params_per_ticker[t]
@@ -81,12 +91,19 @@ def run_oscillator(
             if pos.qty > 0:
                 pnl = pos.unrealized_pct(price)
                 if pnl >= p["take_profit"] or pnl <= -p["stop_loss"] or z >= p["sell_z"]:
-                    pf.sell(t, price, df.index[-1])
-                    action = f"SELL(pnl={pnl:+.2%})"
+                    if pf.sell(t, price, df.index[-1]):
+                        msg = safety.record_trade(pnl, now)
+                        if msg:
+                            print(f"[safety] {msg}")
+                        action = f"SELL(pnl={pnl:+.2%})"
             elif z <= p["buy_z"]:
-                equity = pf.equity(prices_now)
-                if pf.buy(t, price, df.index[-1], equity):
-                    action = "BUY"
+                ok, reason = check_buy(safety, df, pos, now)
+                if not ok:
+                    action = f"SKIP({reason})"
+                else:
+                    equity = pf.equity(prices_now)
+                    if pf.buy(t, price, df.index[-1], equity):
+                        action = "BUY"
 
             events.append({
                 "ts": str(df.index[-1]),
@@ -107,7 +124,7 @@ def run_oscillator(
         with log_file.open("a") as f:
             f.write(json.dumps(record) + "\n")
 
-        moves = [e for e in events if e["action"] != "HOLD"]
+        moves = [e for e in events if e["action"] not in ("HOLD",)]
         if moves:
             tag = " ".join(f"{e['ticker']}:{e['action']}@{e['price']:.2f}" for e in moves)
             print(f"[{record['ts']}] equity={equity:,.2f} ★ {tag}")
